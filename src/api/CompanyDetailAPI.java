@@ -10,25 +10,36 @@ import javax.servlet.annotation.WebServlet;
 import javax.servlet.http.HttpServlet;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
+import javax.servlet.http.HttpSession;
 
 import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 
+import com.APIResponse;
 import com.Company;
 import com.CompanyDAO;
 
 @WebServlet("/api/companies")
-public class CompanyServlet extends HttpServlet {
+public class CompanyAPI extends HttpServlet {
     private static final long serialVersionUID = 1L;
     private CompanyDAO companyDAO;
 
+    @Override
     public void init() {
         companyDAO = new CompanyDAO();
     }
 
+    // GET /api/companies - List all companies
+    @Override
     protected void doGet(HttpServletRequest request, HttpServletResponse response)
             throws ServletException, IOException {
+
+        if (!isAuthenticated(request)) {
+            sendErrorResponse(response, APIResponse.error("Unauthorized", "Please login first", 401));
+            return;
+        }
+
         try {
             List<Company> companies = companyDAO.getAllCompanies();
             JSONArray jsonArray = new JSONArray();
@@ -38,23 +49,31 @@ public class CompanyServlet extends HttpServlet {
                 jsonArray.put(jsonObject);
             }
 
-            response.setContentType("application/json");
-            response.setCharacterEncoding("UTF-8");
-            PrintWriter out = response.getWriter();
-            out.print(jsonArray);
-            out.flush();
+            JSONObject responseData = new JSONObject();
+            responseData.put("companies", jsonArray);
+            responseData.put("total_count", companies.size());
+
+            sendSuccessResponse(response, APIResponse.success("Companies retrieved successfully", responseData));
+
         } catch (Exception e) {
-            sendErrorResponse(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-                            "Error retrieving companies", e.getMessage());
+            sendErrorResponse(response, APIResponse.internalServerError("Error retrieving companies: " + e.getMessage()));
         }
     }
 
+    // POST /api/companies - Create new company
+    @Override
     protected void doPost(HttpServletRequest request, HttpServletResponse response)
             throws ServletException, IOException {
-        StringBuilder sb = new StringBuilder();
+
+        if (!isAuthenticated(request)) {
+            sendErrorResponse(response, APIResponse.error("Unauthorized", "Please login first", 401));
+            return;
+        }
+
         BufferedReader reader = null;
 
         try {
+            StringBuilder sb = new StringBuilder();
             reader = request.getReader();
             String line;
             while ((line = reader.readLine()) != null) {
@@ -65,14 +84,12 @@ public class CompanyServlet extends HttpServlet {
 
             // Validate required fields
             if (!jsonObject.has("company_code") || jsonObject.getString("company_code").trim().isEmpty()) {
-                sendErrorResponse(response, HttpServletResponse.SC_BAD_REQUEST,
-                                "Validation Error", "Company code is required");
+                sendErrorResponse(response, APIResponse.validationError("Company code is required"));
                 return;
             }
 
             if (!jsonObject.has("company_name") || jsonObject.getString("company_name").trim().isEmpty()) {
-                sendErrorResponse(response, HttpServletResponse.SC_BAD_REQUEST,
-                                "Validation Error", "Company name is required");
+                sendErrorResponse(response, APIResponse.validationError("Company name is required"));
                 return;
             }
 
@@ -80,48 +97,26 @@ public class CompanyServlet extends HttpServlet {
 
             // Check for duplicate company code
             if (companyDAO.isCompanyCodeExists(companyCode)) {
-                sendErrorResponse(response, HttpServletResponse.SC_CONFLICT,
-                                "Duplicate Error", "Company code already exists: " + companyCode);
+                sendErrorResponse(response, APIResponse.conflict("Company code already exists: " + companyCode));
                 return;
             }
 
             Company company = mapJSONToCompany(jsonObject);
-            company.setStatus(jsonObject.optString("status", "Active")); // Configurable status
+            company.setStatus(jsonObject.optString("status", "Active"));
 
-            boolean success = companyDAO.addCompany(company);
+            Company createdCompany = companyDAO.addCompany(company);
 
-            if (success) {
-                // Return the created company with generated ID
-                List<Company> companies = companyDAO.getAllCompanies();
-                Company createdCompany = null;
-                for (Company c : companies) {
-                    if (c.getCompany_code().equals(companyCode)) {
-                        createdCompany = c;
-                        break;
-                    }
-                }
-
-                if (createdCompany != null) {
-                    response.setStatus(HttpServletResponse.SC_CREATED);
-                    response.setContentType("application/json");
-                    response.setCharacterEncoding("UTF-8");
-                    PrintWriter out = response.getWriter();
-                    out.print(createCompanyJSON(createdCompany));
-                    out.flush();
-                } else {
-                    response.setStatus(HttpServletResponse.SC_CREATED);
-                }
+            if (createdCompany != null) {
+                response.setStatus(HttpServletResponse.SC_CREATED);
+                sendSuccessResponse(response, APIResponse.success("Company created successfully", createCompanyJSON(createdCompany)));
             } else {
-                sendErrorResponse(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-                                "Database Error", "Failed to create company");
+                sendErrorResponse(response, APIResponse.internalServerError("Failed to create company"));
             }
 
-        } catch (org.json.JSONException e) {
-            sendErrorResponse(response, HttpServletResponse.SC_BAD_REQUEST,
-                            "Invalid JSON", "Invalid JSON format: " + e.getMessage());
+        } catch (JSONException e) {
+            sendErrorResponse(response, APIResponse.badRequest("Invalid JSON format: " + e.getMessage()));
         } catch (Exception e) {
-            sendErrorResponse(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-                            "Server Error", "Unexpected error: " + e.getMessage());
+            sendErrorResponse(response, APIResponse.internalServerError("Unexpected error: " + e.getMessage()));
         } finally {
             if (reader != null) {
                 try {
@@ -166,7 +161,7 @@ public class CompanyServlet extends HttpServlet {
         return company;
     }
 
-    private JSONObject createCompanyJSON(Company company) throws org.json.JSONException {
+    private JSONObject createCompanyJSON(Company company) throws JSONException {
         JSONObject jsonObject = new JSONObject();
         jsonObject.put("id", company.getId());
         jsonObject.put("company_code", company.getCompany_code());
@@ -201,25 +196,38 @@ public class CompanyServlet extends HttpServlet {
         return jsonObject;
     }
 
-    private void sendErrorResponse(HttpServletResponse response, int statusCode,
-                                 String error, String message) throws IOException {
-        response.setStatus(statusCode);
+    private boolean isAuthenticated(HttpServletRequest request) {
+        HttpSession session = request.getSession(false);
+        if (session == null) return false;
+
+        String employeeId = (String) session.getAttribute("emp_id");
+        return employeeId != null && !employeeId.isEmpty();
+    }
+
+    private void sendSuccessResponse(HttpServletResponse response, APIResponse apiResponse) throws IOException {
+        response.setStatus(HttpServletResponse.SC_OK);
         response.setContentType("application/json");
         response.setCharacterEncoding("UTF-8");
 
-        // FIXED: Wrapped the JSON operations in a try-catch block.
         try {
-            JSONObject errorResponse = new JSONObject();
-            errorResponse.put("error", error);
-            errorResponse.put("message", message);
-            errorResponse.put("timestamp", System.currentTimeMillis());
-
             PrintWriter out = response.getWriter();
-            out.print(errorResponse);
+            out.print(apiResponse.toJSON().toString());
             out.flush();
         } catch (JSONException e) {
-            // If creating the JSON error response fails, log the error.
-            // The client will still receive the HTTP status code set earlier.
+            e.printStackTrace();
+        }
+    }
+
+    private void sendErrorResponse(HttpServletResponse response, APIResponse apiResponse) throws IOException {
+        response.setStatus(apiResponse.getStatusCode());
+        response.setContentType("application/json");
+        response.setCharacterEncoding("UTF-8");
+
+        try {
+            PrintWriter out = response.getWriter();
+            out.print(apiResponse.toJSON().toString());
+            out.flush();
+        } catch (JSONException e) {
             e.printStackTrace();
         }
     }
